@@ -1,0 +1,29 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+name: JS-AI-Build-a-thon
+
+services:
+  webapp:
+    project: packages/webapp
+    host: staticwebapp
+    language: js
+    dist: dist
+
+  webapi:
+    project: packages/webapi
+    host: appservice
+    language: js
+
+infra:
+  provider: bicep
+  path: infra
+  parameters:
+    location: westeurope
+
+
+
+
+
+
+
+
