@@ -404,3 +404,5 @@ FodyWeavers.xsd
 # Environment variables
 .env
 .azure
+packages/webapi/.env
+packages/webapp/.env
