@@ -113,7 +113,7 @@ export class ChatInterface extends LitElement {
     
     try {
       // Simulate AI response (replace with real API call later)
-      const aiResponse = await this._apiCall(userQuery);
+      const aiResponse = await this.sendMessage(userQuery);
       
       // Add AI's response to the chat
       this.messages = [
@@ -133,14 +133,35 @@ export class ChatInterface extends LitElement {
   }
 
   // Simulate an AI response (placeholder for future integration)
-  async _apiCall(message) {
-    const res = await fetch("http://localhost:3002/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message }),
-    });
-    const data = await res.json();
-    return data.reply;
+  async sendMessage(message) {
+    try {
+      const response = await fetch('http://localhost:3002/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          message: message,
+          useRAG: true
+        })
+      });
+killall node
+      const data = await response.json();
+      
+      if (data.error) {
+        if (data.retry) {
+          // Wait 2 seconds and try again
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          return this.sendMessage(message);
+        }
+        throw new Error(data.message);
+      }
+
+      return data.reply;
+    } catch (error) {
+      console.error('Chat error:', error);
+      return "Sorry, I'm having trouble connecting. Please try again in a moment.";
+    }
   }
 }
 

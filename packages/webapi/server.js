@@ -1,8 +1,7 @@
-import express from "express";
-import cors from "cors";
-import dotenv from "dotenv";
-import ModelClient from "@azure-rest/ai-inference";
-import { AzureKeyCredential } from "@azure/core-auth";
+import express from 'express';
+import cors from 'cors';
+import dotenv from 'dotenv';
+import axios from 'axios';
 
 dotenv.config();
 
@@ -36,11 +35,12 @@ app.use(express.json());
 // Validate environment variables before creating Azure client
 validateEnvVariables();
 
-// Initialize Azure OpenAI client
-const client = new ModelClient(
-  process.env.AZURE_INFERENCE_SDK_ENDPOINT,
-  new AzureKeyCredential(process.env.AZURE_INFERENCE_SDK_KEY)
-);
+console.log('Loaded env:', {
+  hasKey: !!process.env.AZURE_OPENAI_KEY,
+  endpoint: process.env.AZURE_OPENAI_ENDPOINT,
+  deploymentName: process.env.AZURE_OPENAI_DEPLOYMENT_NAME,
+  apiVersion: process.env.AZURE_OPENAI_API_VERSION
+});
 
 // Health check endpoint for monitoring
 app.get('/health', (req, res) => {
@@ -51,64 +51,60 @@ app.get('/health', (req, res) => {
 app.post("/chat", async (req, res) => {
   try {
     const userMessage = req.body.message;
-    const messages = [
-      { role: "system", content: "You are a helpful assistant" },
-      { role: "user", content: userMessage },
-    ];
+    console.log('Processing request:', { message: userMessage });
 
-    // Construct the full path required by Azure OpenAI API
-    // Format: /openai/deployments/{deployment-name}/chat/completions
-    const apiPath = `/openai/deployments/${process.env.AZURE_OPENAI_DEPLOYMENT_NAME}/chat/completions`;
+    const url = `${process.env.AZURE_OPENAI_ENDPOINT}openai/deployments/${process.env.AZURE_OPENAI_DEPLOYMENT_NAME}/chat/completions`;
+    
+    console.log('Sending request to:', url);
 
-    // Make the API call to Azure OpenAI
-    const response = await client.path(apiPath).post({
-      body: {
-        messages,
-        max_tokens: 4096,
-        temperature: 1,
-        top_p: 1,
+    const response = await axios({
+      method: 'post',
+      url: url,
+      params: {
+        'api-version': process.env.AZURE_OPENAI_API_VERSION
       },
-      queryParameters: {
-        'api-version': '2024-05-01-preview'
+      headers: {
+        'Content-Type': 'application/json',
+        'api-key': process.env.AZURE_OPENAI_KEY
+      },
+      data: {
+        messages: [
+          { role: "system", content: "You are a helpful assistant." },
+          { role: "user", content: userMessage }
+        ],
+        max_tokens: 800,
+        temperature: 0.7
+      },
+      timeout: 30000 // 30 second timeout
+    });
+
+    console.log('Received response:', {
+      status: response.status,
+      hasData: !!response.data
+    });
+
+    res.json({
+      reply: response.data.choices[0].message.content,
+      sources: []
+    });
+
+  } catch (error) {
+    console.error('Chat error details:', {
+      message: error.message,
+      status: error.response?.status,
+      data: error.response?.data,
+      config: {
+        url: error.config?.url,
+        headers: {
+          ...error.config?.headers,
+          'api-key': '[REDACTED]'
+        }
       }
     });
 
-    // Handle various response scenarios
-    if (!response.body) {
-      return res.status(500).json({
-        error: "No response from AI model",
-        details: response
-      });
-    }
-
-    if (response.body.error) {
-      return res.status(500).json({
-        error: "Azure API error",
-        message: response.body.error.message || "Unknown error"
-      });
-    }
-
-    if (!response.body.choices?.[0]?.message?.content) {
-      return res.status(500).json({
-        error: "Invalid response structure",
-        details: response.body
-      });
-    }
-
-    // Send successful response
-    const reply = response.body.choices[0].message.content;
-    res.json({ reply });
-
-  } catch (err) {
-    console.error('Chat error:', {
-      message: err.message,
-      code: err.code,
-      response: err.response?.body
-    });
-    
-    res.status(500).json({ 
-      error: "Chat failed", 
-      message: err.message 
+    res.status(500).json({
+      error: "Failed to get response from AI",
+      message: error.response?.data?.error?.message || error.message
     });
   }
 });
