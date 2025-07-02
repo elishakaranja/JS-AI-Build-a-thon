@@ -24,7 +24,7 @@
   },
   "contributors": [],
   "scripts": {
-    "start": "node server.js",
+    "start": "NODE_OPTIONS=--dns-result-order=ipv4first node server.js",
     "dev": "",
     "test": ""
   },
@@ -34,6 +34,7 @@
     "axios": "^1.10.0",
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "pdf-parse": "^1.1.1"
   }
 }
