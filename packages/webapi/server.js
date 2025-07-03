@@ -1,11 +1,13 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
 import pdfParse from 'pdf-parse/lib/pdf-parse.js';
 import { fileURLToPath } from 'url';
+import { AzureChatOpenAI } from "@langchain/openai";
+import { BufferMemory } from "langchain/memory";
+import { ChatMessageHistory } from "langchain/stores/message/in_memory";
 
 dotenv.config();
 
@@ -24,11 +26,11 @@ process.on('unhandledRejection', (error) => {
 // Validate required Azure OpenAI configuration
 function validateEnvVariables() {
   const required = [
-    'AZURE_INFERENCE_SDK_ENDPOINT',
-    'AZURE_INFERENCE_SDK_KEY',
-    'AZURE_OPENAI_DEPLOYMENT_NAME'
+    'AZURE_OPENAI_API_KEY',
+    'AZURE_OPENAI_ENDPOINT',
+    'AZURE_OPENAI_DEPLOYMENT_NAME',
+    'AZURE_OPENAI_API_VERSION'
   ];
-  
   const missing = required.filter(key => !process.env[key]);
   if (missing.length > 0) {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
@@ -47,7 +49,7 @@ console.log('Loaded env:', {
   endpoint: process.env.AZURE_OPENAI_ENDPOINT,
   deploymentName: process.env.AZURE_OPENAI_DEPLOYMENT_NAME,
   apiVersion: process.env.AZURE_OPENAI_API_VERSION,
-  keyFirst5: process.env.AZURE_OPENAI_KEY ? process.env.AZURE_OPENAI_KEY.slice(0, 5) + '...' : undefined
+  keyFirst5: process.env.AZURE_OPENAI_API_KEY ? process.env.AZURE_OPENAI_API_KEY.slice(0, 5) + '...' : undefined
 });
 
 // PDF RAG logic
@@ -104,77 +106,66 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
+const sessionMemories = {};
+function getSessionMemory(sessionId) {
+  if (!sessionMemories[sessionId]) {
+    const history = new ChatMessageHistory();
+    sessionMemories[sessionId] = new BufferMemory({
+      chatHistory: history,
+      returnMessages: true,
+      memoryKey: "chat_history",
+    });
+  }
+  return sessionMemories[sessionId];
+}
+
+const chatModel = new AzureChatOpenAI({
+  azureOpenAIApiKey: process.env.AZURE_OPENAI_API_KEY,
+  azureOpenAIApiInstanceName: process.env.AZURE_OPENAI_ENDPOINT.replace(/^https:\/\//, '').split('.')[0], // Extract instance name from endpoint
+  azureOpenAIApiDeploymentName: process.env.AZURE_OPENAI_DEPLOYMENT_NAME,
+  azureOpenAIApiVersion: process.env.AZURE_OPENAI_API_VERSION,
+  temperature: 1,
+  maxTokens: 4096,
+});
+
 // Chat endpoint that interfaces with Azure OpenAI
 app.post("/chat", async (req, res) => {
-  try {
-    const userMessage = req.body.message;
-    const useRAG = req.body.useRAG === undefined ? true : req.body.useRAG;
-    let messages = [];
-    let sources = [];
-    if (useRAG) {
-      await loadPDF();
-      sources = retrieveRelevantContent(userMessage);
-      if (sources.length > 0) {
-        messages.push({
-          role: "system",
-          content: `You are a helpful assistant answering questions about the company based on its employee handbook.\nUse ONLY the following information from the handbook to answer the user's question.\nIf you can't find relevant information in the provided context, say so clearly.\n--- EMPLOYEE HANDBOOK EXCERPTS ---\n${sources.join('')}\n--- END OF EXCERPTS ---`
-        });
-      } else {
-        messages.push({
-          role: "system",
-          content: "You are a helpful assistant. No relevant information was found in the employee handbook for this question."
-        });
-      }
-    } else {
-      messages.push({
+  const userMessage = req.body.message;
+  const useRAG = req.body.useRAG === undefined ? true : req.body.useRAG;
+  const sessionId = req.body.sessionId || "default";
+  let sources = [];
+  const memory = getSessionMemory(sessionId);
+  const memoryVars = await memory.loadMemoryVariables({});
+  if (useRAG) {
+    await loadPDF();
+    sources = retrieveRelevantContent(userMessage);
+  }
+  const systemMessage = useRAG
+    ? {
         role: "system",
-        content: "You are a helpful assistant."
-      });
-    }
-    messages.push({ role: "user", content: userMessage });
-
-    const url = `${process.env.AZURE_OPENAI_ENDPOINT}openai/deployments/${process.env.AZURE_OPENAI_DEPLOYMENT_NAME}/chat/completions`;
-    const response = await axios({
-      method: 'post',
-      url: url,
-      params: {
-        'api-version': process.env.AZURE_OPENAI_API_VERSION
-      },
-      headers: {
-        'Content-Type': 'application/json',
-        'api-key': process.env.AZURE_OPENAI_KEY
-      },
-      data: {
-        messages,
-        max_tokens: 800,
-        temperature: 0.7
-      },
-      timeout: 30000 // 30 second timeout
-    });
-
-    res.json({
-      reply: response.data.choices[0].message.content,
-      sources: useRAG ? sources : []
-    });
-  } catch (error) {
-    console.error('Chat error details:', {
-      message: error.message,
-      status: error.response?.status,
-      data: error.response?.data,
-      config: {
-        url: error.config?.url,
-        headers: {
-          ...error.config?.headers,
-          'api-key': '[REDACTED]'
-        }
+        content: sources.length > 0
+          ? `You are a helpful assistant for Contoso Electronics. You must ONLY use the information provided below to answer.\n\n--- EMPLOYEE HANDBOOK EXCERPTS ---\n${sources.join('\n\n')}\n--- END OF EXCERPTS ---`
+          : `You are a helpful assistant for Contoso Electronics. The excerpts do not contain relevant information for this question. Reply politely: \"I'm sorry, I don't know. The employee handbook does not contain information about that.\"`,
       }
-    });
-
-    console.error('Full error object:', JSON.stringify(error, Object.getOwnPropertyNames(error), 2));
-
+    : {
+        role: "system",
+        content: "You are a helpful and knowledgeable assistant. Answer the user's questions concisely and informatively.",
+      };
+  try {
+    const messages = [
+      systemMessage,
+      ...(memoryVars.chat_history || []),
+      { role: "user", content: userMessage },
+    ];
+    const response = await chatModel.invoke(messages);
+    await memory.saveContext({ input: userMessage }, { output: response.content });
+    res.json({ reply: response.content, sources });
+  } catch (err) {
+    console.error(err);
     res.status(500).json({
-      error: "Failed to get response from AI",
-      message: error.response?.data?.error?.message || error.message
+      error: "Model call failed",
+      message: err.message,
+      reply: "Sorry, I encountered an error. Please try again."
     });
   }
 });
@@ -202,3 +193,5 @@ process.on('SIGTERM', () => {
     process.exit(0);
   });
 });
+
+
